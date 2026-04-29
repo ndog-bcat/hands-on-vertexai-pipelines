@@ -84,7 +84,7 @@ export PIPELINE_ROOT=gs://$BUCKET/pipeline-root
 uv run python 01-first-pipeline/01-direct-run.py
 ```
 
-출력된 콘솔 URL 에서 `generate-data → process-data → notify` 흐름 확인 (5–7 분).
+출력된 **콘솔 URL** 클릭 → 그래프에서 `generate-data → process-data → notify` 가 차례로 ✅ 되는지 확인 (5–7 분).
 
 ---
 
@@ -112,7 +112,9 @@ uv run python submit.py --project $GCP_PROJECT --region $GCP_REGION \
     --param bucket=$BUCKET
 ```
 
-콘솔에서 세 실행을 비교 — `artifact-io` 만 Artifacts 탭에 metadata 가 보입니다.
+제출 후 출력된 콘솔 URL 세 개를 각각 열어서 노드 클릭 → **아티팩트** 탭 비교:
+- `artifact-io` 만 Dataset 카드에 `num_rows`, `format` metadata 가 보임
+- `gcs-string` / `gcs-fuse` 는 아티팩트 탭이 비어 있고 **파라미터** 탭에 경로 문자열만 보임
 
 ---
 
@@ -224,16 +226,65 @@ git push origin main
 
 ---
 
-## 9. 결과 확인 & 실행
+## 9. 워크플로우 통과 확인
 
-워크플로우 5단계가 모두 통과하면 콘솔의 **파이프라인 → 템플릿 → ci-cd-cifar10** 에 새 버전이 등록됩니다. 클릭 → **실행 만들기** → 파라미터 선택:
+GitHub repo → **Actions 탭** → 가장 최근 `03-ci-cd` 실행 클릭 → 5 step 이 모두 ✅ 인지 확인:
+
+1. Authenticate to Google Cloud (WIF)
+2. Resolve per-component image tags (last-touch SHA)
+3. Build & push only changed components
+4. Compile pipeline with per-component tags
+5. Upload pipeline template to KFP registry
+
+5단계까지 통과하면 GCP 콘솔로 이동.
+
+---
+
+## 10. 콘솔에서 템플릿 실행 (수동)
+
+CI 는 **템플릿 등록까지만** 합니다. 실제 실행은 본인이 콘솔에서 시작합니다.
+
+### 10-1. 템플릿이 올라왔는지 확인
+
+```
+https://console.cloud.google.com/vertex-ai/pipelines/templates?project=<PROJECT_ID>
+```
+
+좌측 메뉴 **에이전트 플랫폼 → 파이프라인 → 템플릿** 으로 들어가도 됨. 리전 셀렉터(좌상단) 가 `us-central1` 인지 확인. `ci-cd-cifar10` 항목이 보이고, 클릭하면 버전 목록(태그: `latest`, `<git-sha>`)이 나옵니다.
+
+### 10-2. 실행 만들기
+
+`ci-cd-cifar10` → 원하는 버전(보통 `latest`) 선택 → 우상단 **실행 만들기** 클릭.
+
+런타임 구성 화면에서:
+
+- **출력 디렉터리**: 기본값 그대로 두면 `PIPELINE_ROOT` Variable 값이 채워짐
+- **파라미터**: 아래 표에 맞춰 선택
 
 | 파라미터 | CPU 학습 | T4 GPU 학습 |
 |---|---|---|
 | `train_accelerator_count` | `0` | `1` |
 | `cpu_train` / `memory_train` | `4` / `16G` | `4` / `16G` |
+| `epochs` | `3` | `3` |
 
-같은 템플릿으로 두 모드 다 실행 가능합니다. 첫 실행은 이미지 pull + CIFAR-10 다운로드 포함 15–20분.
+- **실패 정책**: "한 단계가 실패하는 즉시 이 실행 실패" 권장
+- **캐시**: 첫 실행은 끔, 이후 재실행은 켜면 빠름
+
+우하단 **제출** 클릭.
+
+### 10-3. 실행 모니터링
+
+제출 직후 자동으로 실행 상세 화면으로 이동. 그래프에서 노드를 클릭하면 우측 패널에:
+
+- **로그** 탭 — Cloud Logging 의 실시간 stdout/stderr
+- **노드 세부정보** 탭 — duration, 입력/출력 파라미터
+- **아티팩트** 탭 — `Output[Dataset|Model|Metrics]` 카드
+
+첫 실행은 이미지 pull + CIFAR-10 다운로드 포함 **15–20 분**. 두 번째부터는 캐시 + 이미지 cached 로 더 빠름.
+
+### 10-4. 메트릭 확인
+
+`evaluation` 노드 → **아티팩트** 탭 → `metrics` 카드 클릭 → `accuracy` 값 (CIFAR-10 SimpleCNN 기준 0.55–0.65 정도가 정상).
 
 ---
 
@@ -269,6 +320,22 @@ GPU 쿼터 신청:
 
 **같은 commit 재실행 시 이미지 빌드 모두 skip**
 정상 동작. 모든 컴포넌트 태그가 이미 AR 에 있음. 강제 재빌드는 해당 폴더에 새 커밋 필요.
+
+---
+
+## 콘솔에서 직접 해야 하는 작업 모음
+
+명령어로 자동화되지 않고 **반드시 웹 UI 에서 직접 클릭** 해야 하는 항목들:
+
+| # | 위치 | 할 일 |
+|---|---|---|
+| 1 | GitHub repo → Settings → Secrets and variables → Actions → **Variables 탭** | 7 개 Variable 입력 (7단계) |
+| 2 | (필요 시) GCP 콘솔 → IAM & Admin → **Quotas** | GPU 학습 쿼터 신청 (트러블슈팅 절) |
+| 3 | GitHub repo → **Actions 탭** | 워크플로우 5 step 통과 확인 (9단계) |
+| 4 | GCP 콘솔 → Vertex AI → **파이프라인 → 템플릿** | 등록된 템플릿 확인 + "실행 만들기" (10-1, 10-2) |
+| 5 | Vertex AI → 파이프라인 → **실행** | 그래프 노드 클릭 → 로그 / 아티팩트 / 메트릭 확인 (10-3, 10-4) |
+
+CI 는 **템플릿을 만들어 등록만 합니다.** 누가, 언제, 어떤 파라미터로 실행할지는 사람이 결정 — 이 분리가 운영에서 중요한 이유는 동일 코드를 dev/staging/prod 서로 다른 파라미터로 돌리거나 PR 리뷰어 승인 게이트를 추가하기 위해서입니다.
 
 ---
 
