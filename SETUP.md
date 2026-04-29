@@ -160,12 +160,36 @@ CI (챕터 03 의 GitHub Actions) 에서는 사람 계정 대신 **Workload Iden
 
 GPU 로 학습을 돌릴 계획이라면 현재 프로젝트의 GPU 쿼터를 미리 확인해두는 것이 좋습니다. 신규 프로젝트는 대부분의 GPU 에 대해 1개 까지만 허용되고, A100 같은 상위 GPU 는 0개 (즉, 쿼터 증가 요청 필요) 인 경우가 많습니다.
 
+### 헷갈리지 말 것 — GPU 쿼터는 세 종류로 분리되어 있음
+
+| 쿼터 메트릭 | 어디에 쓰이나 | 신규 프로젝트 디폴트 (T4) |
+|---|---|---|
+| `compute.googleapis.com/NVIDIA_T4_GPUS` | GCE 일반 VM (직접 띄우는 VM) | 1 |
+| `aiplatform.googleapis.com/custom_model_training_nvidia_t4_gpus` | **Vertex AI 학습 잡** | **0** |
+| `aiplatform.googleapis.com/custom_model_serving_nvidia_t4_gpus` | Vertex AI 모델 서빙(엔드포인트) | 1 |
+
+세 가지가 **서로 별개로 운영** 됩니다. GCE 쪽 T4 가 1 이라도 Vertex AI 학습용 T4 는 0 인 경우가 흔합니다. 챕터 03 의 train 컴포넌트가 GPU 로 돌려면 두 번째 쿼터가 1 이상 있어야 합니다.
+
+### Compute Engine 쪽 쿼터 (GCE VM 용)
+
 ```bash
 gcloud compute regions describe us-central1 --project <PROJECT_ID> \
     --format="value(quotas)" | tr ',' '\n' | grep -iE 'gpu|nvidia'
 ```
 
-쿼터 증가가 필요하다면 Google Cloud 콘솔의 `IAM & Admin → Quotas` 에서 해당 메트릭을 찾아 요청을 올립니다. 승인까지 수 시간에서 수일까지 걸릴 수 있으니, GPU 학습을 계획한다면 미리 신청해 두는 것이 좋습니다.
+### Vertex AI 학습 쿼터 (실제 학습 잡이 보는 쿼터)
+
+콘솔 화면에서 가장 빨리 확인됩니다 (CLI 출력은 가공이 필요해서):
+
+```
+https://console.cloud.google.com/iam-admin/quotas?project=<PROJECT_ID>
+```
+
+상단 Filter 에 `Custom model training Nvidia T4` 를 입력하면 리전별 한도가 한 번에 보입니다.
+
+### 쿼터 증가 신청
+
+쿼터가 부족하면 위 콘솔 화면에서 해당 메트릭의 본인 리전 행을 체크 → **Edit Quotas** → 새 한도 값과 사유 입력 → 제출. 신규 계정은 보통 1–24 시간 안에 승인되지만 보장은 안 됩니다. GPU 학습을 계획한다면 미리 신청해 두는 것이 좋습니다.
 
 ## 7. 환경변수 export
 
