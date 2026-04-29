@@ -154,9 +154,11 @@ uv run python submit.py --project $GCP_PROJECT --region $GCP_REGION \
 
 ## 6단계 — 챕터 03 (CI/CD) 셋업
 
-여기가 본격적입니다. 본인 fork 의 워크플로우가 본인 GCP 프로젝트로 이미지를 푸시하고 파이프라인을 제출하도록 연결해야 합니다. 모든 명령은 위에서 잡은 `$PROJECT_ID`, `$REGION`, `$BUCKET`, `$PROJECT_NUMBER` 변수를 그대로 씁니다.
+여기가 본격적입니다. 본인 fork 의 워크플로우가 본인 GCP 프로젝트로 이미지를 빌드/푸시하고 **파이프라인 템플릿을 등록** 하도록 연결해야 합니다. 워크플로우는 직접 실행을 트리거하지 않고, 콘솔의 "파이프라인 → 템플릿" 에 새 버전을 올려두기만 합니다. 실행은 본인이 콘솔에서 원하는 시점에 파라미터/컴퓨팅 스펙을 골라 trigger 합니다.
 
-추가로 본인의 fork 정보를 변수로 잡으세요.
+또한 monorepo CI 패턴을 적용해서 — 변경된 컴포넌트 폴더(`data-preparation/`, `train/`, `evaluation/`) 만 새 이미지로 빌드되고, 변경되지 않은 컴포넌트는 이전 이미지를 그대로 재사용합니다. 각 이미지의 태그는 그 폴더를 마지막으로 건드린 커밋의 short SHA 로 결정됩니다.
+
+모든 명령은 위에서 잡은 `$PROJECT_ID`, `$REGION`, `$BUCKET`, `$PROJECT_NUMBER` 변수를 그대로 씁니다. 추가로 본인의 fork 정보를 변수로 잡으세요.
 
 ```bash
 export GH_OWNER=<your-github-username>
@@ -193,14 +195,9 @@ gcloud storage buckets add-iam-policy-binding gs://$BUCKET \
     --project $PROJECT_ID
 ```
 
-### 6-3. Docker 이미지를 저장할 Artifact Registry 저장소 생성
+### 6-3. Docker 이미지용 Artifact Registry 저장소 생성
 
-신규 프로젝트는 GCR 가 비활성이라 **Artifact Registry 사용을 권장** 합니다. 현재 워크플로우의 기본은 `gcr.io` 로 되어 있으므로, AR 로 가려면 두 군데를 바꿔야 합니다 (자세한 변경 가이드는 `03-ci-cd/README.md` 의 마지막 절 참고):
-
-1. `03-ci-cd/pipeline.py` 의 `IMAGE_REGISTRY` 기본값을 `${REGION}-docker.pkg.dev/${PROJECT_ID}/vertex-ci-images` 형태로
-2. `.github/workflows/03-ci-cd.yml` 의 `gcloud auth configure-docker gcr.io` → `${REGION}-docker.pkg.dev` 도메인으로
-
-저장소 생성:
+세 컴포넌트의 컨테이너 이미지가 들어갈 곳입니다. 신규 프로젝트는 GCR 가 비활성이라 **Artifact Registry 만 사용** 합니다 (워크플로우는 이미 AR 에 푸시하도록 구성되어 있음).
 
 ```bash
 gcloud artifacts repositories create vertex-ci-images \
@@ -210,7 +207,23 @@ gcloud artifacts repositories create vertex-ci-images \
     --project $PROJECT_ID
 ```
 
-### 6-4. Workload Identity Federation — 풀과 GitHub Provider 생성
+### 6-4. KFP 템플릿용 Artifact Registry 저장소 생성
+
+컴파일된 파이프라인 YAML 을 등록할 KFP-format 저장소입니다. 콘솔의 "파이프라인 → 템플릿" 화면이 바로 이 저장소를 읽어 보여줍니다.
+
+```bash
+gcloud artifacts repositories create kfp-templates \
+    --repository-format=kfp \
+    --location=us \
+    --description="KFP pipeline templates for Vertex AI" \
+    --project $PROJECT_ID
+```
+
+> **위치(location) 가 `us` 멀티 리전인 점에 주의.** Vertex AI 콘솔의 템플릿 화면은 멀티 리전 KFP repo 를 잘 인식합니다. 단일 리전 (`us-central1`) 에 만들 수도 있지만 콘솔 표시 동작은 변동이 있을 수 있어 `us` 를 권장합니다.
+
+생성 후 host URL 은 `https://us-kfp.pkg.dev/<PROJECT>/kfp-templates` 형태가 됩니다. 이 값은 7단계의 `KFP_HOST` Variable 로 들어갑니다.
+
+### 6-5. Workload Identity Federation — 풀과 GitHub Provider 생성
 
 서비스 계정 키 JSON 을 GitHub 시크릿에 올리지 않고, GitHub 가 발급하는 OIDC 토큰으로 GCP 인증하는 방식입니다.
 
@@ -234,7 +247,7 @@ gcloud iam workload-identity-pools providers create-oidc github-provider \
 
 `attribute-condition` 의 `repository_owner == '${GH_OWNER}'` 가 핵심 보안 장치입니다. 이게 없으면 같은 issuer 의 다른 GitHub 사용자도 토큰으로 GCP 에 들어올 수 있습니다.
 
-### 6-5. 본인 fork repo 가 SA 를 impersonate 할 수 있도록 바인딩
+### 6-6. 본인 fork repo 가 SA 를 impersonate 할 수 있도록 바인딩
 
 ```bash
 gcloud iam service-accounts add-iam-policy-binding $CI_SA \
@@ -245,7 +258,7 @@ gcloud iam service-accounts add-iam-policy-binding $CI_SA \
 
 이 한 줄이 "이 SA 는 **이 특정 GitHub repo** 의 워크플로우에서만 impersonate 가능하다" 를 박는 부분입니다.
 
-### 6-6. WIF Provider 의 전체 리소스 경로 확인
+### 6-7. WIF Provider 의 전체 리소스 경로 확인
 
 GitHub Variables 에 넣을 값입니다.
 
@@ -255,14 +268,16 @@ echo "projects/${PROJECT_NUMBER}/locations/global/workloadIdentityPools/github/p
 
 ## 7단계 — GitHub repo Variables 등록
 
-본인 fork 의 GitHub 페이지로 가서 **Settings → Secrets and variables → Actions → Variables** 탭에서 5 개 추가합니다 (Secrets 가 아니라 Variables).
+본인 fork 의 GitHub 페이지로 가서 **Settings → Secrets and variables → Actions → Variables** 탭에서 7 개 추가합니다 (Secrets 가 아니라 Variables).
 
 | 이름 | 값 (예시) |
 |---|---|
 | `GCP_PROJECT` | `your-gcp-project-id` |
 | `GCP_REGION` | `us-central1` |
 | `PIPELINE_ROOT` | `gs://<your-project>-vertex-pipelines/pipeline-root` |
-| `WIF_PROVIDER` | 6-6 명령이 출력한 전체 경로 |
+| `AR_REPO` | `vertex-ci-images` |
+| `KFP_HOST` | `https://us-kfp.pkg.dev/<your-project>/kfp-templates` |
+| `WIF_PROVIDER` | 6-7 명령이 출력한 전체 경로 |
 | `WIF_SERVICE_ACCOUNT` | `vertex-ci@<your-project>.iam.gserviceaccount.com` |
 
 ## 8단계 — 첫 워크플로우 트리거
@@ -280,41 +295,61 @@ git push origin main
 
 Actions 탭에서 흐름이 이렇게 진행되는 것을 봅니다:
 
-1. `Authenticate to Google Cloud (WIF)` — 통과 못 하면 6-4/6-5 의 WIF 바인딩이 잘못된 것
-2. `Build & push each component image` — 통과 못 하면 6-3 의 Artifact Registry 또는 SA 의 `roles/artifactregistry.writer` 권한 누락
-3. `Compile pipeline` — `IMAGE_TAG` 가 SHA 로 잘 박혔는지 로그 확인
-4. `Submit pipeline to Vertex AI` — 통과하면 `console.cloud.google.com/vertex-ai/...` URL 이 출력됨
+1. `Authenticate to Google Cloud (WIF)` — 통과 못 하면 6-5/6-6 의 WIF 바인딩이 잘못된 것
+2. `Resolve per-component image tags (last-touch SHA)` — 각 컴포넌트의 태그가 출력되는지 확인
+3. `Build & push only changed components` — 변경된 컴포넌트만 빌드. 첫 실행이면 세 개 다 빌드, 그 이후는 변경된 것만. 통과 못 하면 6-3 의 AR 저장소 또는 SA 의 `roles/artifactregistry.writer` 권한 누락
+4. `Compile pipeline with per-component tags` — 컴포넌트별 태그가 YAML 에 잘 박혔는지 로그 확인
+5. `Upload pipeline template to KFP registry` — 통과하면 콘솔의 템플릿 화면에 새 버전이 등록됨
 
-URL 클릭해서 Vertex AI 콘솔에서 `data-preparation → train → evaluation` 이 도는 것 확인. 첫 실행은 이미지 pull + CIFAR-10 다운로드까지 포함되어 15–20 분 정도 걸립니다. 두 번째부터는 캐싱으로 훨씬 빨라집니다.
+이후 **Vertex AI 콘솔 → 파이프라인 → 템플릿** 으로 이동해 `ci-cd-cifar10` 템플릿을 클릭. 등록된 버전 목록에서 방금 푸시한 git SHA 또는 `latest` 태그를 선택하고 **"실행 만들기"** 를 누릅니다.
+
+런타임 구성 화면에서 컴퓨팅 스펙과 GPU 사용 여부를 직접 선택할 수 있습니다:
+
+| 파라미터 | CPU 학습 | T4 GPU 1대 학습 |
+|---|---|---|
+| `cpu_train` | `4` | `4` |
+| `memory_train` | `16G` | `16G` |
+| `train_accelerator_type` | `NVIDIA_TESLA_T4` (그대로) | `NVIDIA_TESLA_T4` |
+| `train_accelerator_count` | `0` | `1` |
+
+`train_accelerator_count=0` 이면 GPU 미할당 (CUDA 베이스 이미지여도 자동 CPU fallback). `1` 로 바꾸면 T4 1 개가 붙습니다. T4 학습은 콜드 스타트 포함 5–10 분 추가될 수 있고, CPU 실행은 콜드 스타트만 1–3 분 정도입니다. 첫 실행은 이미지 pull + CIFAR-10 다운로드까지 포함되어 15–20 분 정도 걸립니다.
 
 ## 자주 막히는 지점 모음
 
 **`storage.objects.get` / `create` 권한 에러**
-2단계 후반부에서 SA 에 버킷 권한 줬어도, 파이프라인 실행 SA (기본 Compute SA) 에도 따로 줘야 합니다. `gcloud storage buckets add-iam-policy-binding` 명령을 빼먹지 않았는지 확인.
+2단계 후반부에서 기본 Compute SA 에 버킷 권한 부여를 빼먹은 경우. 파이프라인 실행 SA (콘솔에서 SA 를 명시 안 하면 기본 Compute SA 가 자동 선택) 에도 따로 권한이 필요합니다. `gcloud storage buckets add-iam-policy-binding` 명령을 빼먹지 않았는지 확인.
 
 **`Permission 'iam.serviceAccounts.getAccessToken' denied`**
 WIF principalSet 의 `${GH_OWNER}/${GH_REPO}` 가 본인 fork 와 정확히 일치하지 않으면 발생. 대소문자, 오타, 그리고 **fork 한 계정 vs 원본 계정** 을 혼동하지 않았는지 확인.
+
+**`IAM Service Account Credentials API has not been used in project ... or it is disabled`**
+2-2 의 API 활성화 명령에서 `iamcredentials.googleapis.com` 이 빠진 경우. WIF 가 OIDC 토큰을 받아 SA 를 impersonate 하려면 이 API 가 켜져 있어야 합니다. `gcloud services enable iamcredentials.googleapis.com --project $PROJECT_ID` 한 번 돌리고, 1–2 분 propagation 후 워크플로우 Re-run.
 
 **이미지 pull 실패 (`ErrImagePull` / `Schema 1 deprecated`)**
 챕터 01 의 busybox 처럼 manifest 가 deprecated 된 외부 이미지 참조 시 발생. 본인이 빌드한 이미지를 쓰면 이 문제는 안 생깁니다. 챕터 03 은 본인 빌드 이미지만 쓰니 안전.
 
 **`Invalid image URI` (Vertex AI 제출 단계)**
-이미지 호스트가 Vertex AI 의 허용 목록에 없을 때 발생. `gcr.io/<project>`, `*-docker.pkg.dev/<project>`, Docker Hub (`busybox:stable` 같이 prefix 없는 형식) 만 허용됩니다.
+이미지 호스트가 Vertex AI 의 허용 목록에 없을 때 발생. `*-docker.pkg.dev/<project>`, Docker Hub (`busybox:stable` 같이 prefix 없는 형식) 만 허용됩니다. `mirror.gcr.io` 같은 호스트는 reject 됩니다.
 
 **GPU 쿼터 0 으로 학습 실패**
-A100 같은 상위 GPU 는 신규 프로젝트에서 0 으로 시작합니다. T4 는 1 까지 허용. `SETUP.md` 의 GPU 쿼터 확인 절 참고. 챕터 03 의 train 컴포넌트는 기본 CPU 학습이니 우선 그대로 돌려도 됩니다.
+A100 같은 상위 GPU 는 신규 프로젝트에서 0 으로 시작합니다. T4 는 1 까지 허용. `SETUP.md` 의 GPU 쿼터 확인 절 참고. 챕터 03 의 train 컴포넌트는 기본 `train_accelerator_count=0` 이라 CPU 로 돌고, 1 로 바꾸면 T4 1 대를 사용합니다.
 
-**워크플로우는 도는데 Vertex AI 콘솔에 파이프라인이 안 보임**
-프로젝트가 일치하는지, 리전 셀렉터를 `us-central1` 로 두었는지 확인. 콘솔 좌측 상단의 프로젝트 선택과 좌측 메뉴의 리전을 둘 다 봐야 합니다.
+**워크플로우는 도는데 콘솔의 템플릿 목록에 안 보임**
+프로젝트가 일치하는지, 그리고 콘솔의 **파이프라인 → 템플릿** 화면이 KFP repo 의 위치를 자동으로 잡는지 확인. 6-4 에서 `--location=us` 멀티 리전으로 만든 경우 대부분 자동 인식되지만, 단일 리전에 만들었다면 콘솔 좌측 상단 리전 셀렉터를 그 리전으로 맞춰야 보입니다.
 
 **캐시가 없는데도 두 번째 실행이 너무 빠름**
-KFP 가 입력이 같으면 캐시된 결과를 재사용합니다. 본인이 의도한 바가 아니면 워크플로우의 `--enable-caching` 옵션을 빼고 다시 푸시하세요.
+KFP 가 입력이 같으면 캐시된 결과를 재사용합니다. 본인이 의도한 바가 아니면 콘솔의 "실행 만들기" 화면에서 캐시 옵션을 끄고 실행하세요.
+
+**같은 commit 으로 워크플로우 재실행했는데 이미지 빌드가 모두 skip 됨**
+이건 정상입니다. 모든 컴포넌트의 태그(=last-touch SHA) 가 이미 AR 에 푸시되어 있어 빌드를 생략한 것. 강제로 재빌드하려면 해당 컴포넌트 폴더에 의미 있는 변경(또는 빈 변경) 을 한 새 커밋이 필요합니다.
 
 ## 정리 / 다음 단계
 
 여기까지 통과하면 핸즈온의 모든 챕터를 본인 환경에서 재현한 것입니다. 다음으로 시도해 볼 만한 것들:
 
-- **GPU 학습 활성화**: `03-ci-cd/pipeline.py` 의 `set_accelerator_*` 두 줄 주석 해제 + `train/Dockerfile` 의 base 를 CUDA 런타임으로 교체. T4 1 개로 충분.
-- **하이퍼파라미터 변경 후 재배포**: `epochs`, `batch_size`, `lr` 을 `--param` 으로 오버라이드하거나, `pipeline.py` 의 기본값을 바꿔 커밋 → 자동 재배포.
-- **컴포넌트 추가**: `inference` 컴포넌트를 추가해 모델을 받아서 단일 이미지에 대한 예측을 출력하도록 확장. 새 폴더만 만들면 워크플로우가 자동으로 인식해 빌드.
+- **GPU 학습 켜기/끄기**: 코드 수정 없이 콘솔의 "실행 만들기" 에서 `train_accelerator_count` 를 1로 두면 T4 1 대로 학습. 0으로 두면 CPU. 같은 템플릿 하나로 두 모드를 자유롭게 오갈 수 있습니다.
+- **하이퍼파라미터 변경 후 재배포**: `pipeline.py` 의 `epochs`, `batch_size`, `lr` 기본값을 바꿔 커밋하거나, 그대로 두고 콘솔에서 매 실행마다 오버라이드.
+- **컴포넌트 추가**: `inference` 컴포넌트를 추가해 모델을 받아서 단일 이미지에 대한 예측을 출력하도록 확장. 새 폴더에 `Dockerfile` + `main.py` 만 만들면 워크플로우의 monorepo 로직이 자동으로 인식해 빌드.
+- **변경 영향 범위 실험**: 한 컴포넌트 폴더만 의미 있는 변경 후 push → Actions 로그에서 그 컴포넌트만 빌드되고 나머지는 `::notice::skip` 으로 건너뛰는 것을 확인.
+- **PR 트리거 추가**: 현재는 main push 에만 트리거. PR 에서 빌드까지만 하고 템플릿 등록은 main 에서만 하도록 분리하면 더 안전한 GitOps 패턴이 됩니다.
 - **PR 트리거 추가**: 현재는 main push 에만 트리거. PR 에서 빌드까지만 하고 제출은 main 에서만 하도록 분리하면 더 안전한 GitOps 패턴이 됩니다.
