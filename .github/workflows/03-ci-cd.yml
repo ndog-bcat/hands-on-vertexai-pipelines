@@ -2,17 +2,21 @@ name: 03-ci-cd
 
 # main 에 머지되면 실행.
 #   1) 03-ci-cd/ 하위의 각 컴포넌트 폴더를 돌면서 이미지를 빌드
-#      → Artifact Registry 의 docker repo `vertex-ci-images` 에 푸시
+#      → Artifact Registry 의 docker repo (`vertex-ci-images`) 에 푸시
 #   2) 커밋 해시를 IMAGE_TAG 로 박아서 파이프라인 YAML 컴파일
-#   3) Vertex AI Pipelines 에 제출
+#   3) 컴파일된 YAML 을 KFP 템플릿 레지스트리(Artifact Registry) 에 업로드
+#      → Vertex AI 콘솔의 "파이프라인 템플릿" 에서 바로 보이고, 거기서 "실행 만들기"
+#         로 본인이 원하는 시점에 실행 가능
 #
 # 사전 설정이 필요한 repository variables:
 #     GCP_PROJECT           — GCP 프로젝트 ID
-#     GCP_REGION            — 예) us-central1
-#     PIPELINE_ROOT         — 예) gs://<bucket>/pipeline-root
-#     AR_REPO               — Artifact Registry docker repo 이름 (예: vertex-ci-images)
+#     GCP_REGION            — 예) us-central1 (Docker 이미지 / pipeline-root 용)
+#     PIPELINE_ROOT         — 예) gs://<bucket>/pipeline-root (콘솔에서 실행 시 사용)
+#     AR_REPO               — Docker 이미지용 AR repo 이름 (예: vertex-ci-images)
+#     KFP_HOST              — KFP 템플릿 AR repo 의 host URL
+#                             (예: https://us-kfp.pkg.dev/<project>/<kfp-repo>)
 #     WIF_PROVIDER          — projects/<num>/locations/global/workloadIdentityPools/<pool>/providers/<provider>
-#     WIF_SERVICE_ACCOUNT   — 파이프라인 제출 + AR 푸시 권한이 있는 SA 이메일
+#     WIF_SERVICE_ACCOUNT   — AR 푸시 + 템플릿 업로드 권한이 있는 SA 이메일
 
 on:
   push:
@@ -31,7 +35,7 @@ env:
   IMAGE_REGISTRY: ${{ vars.GCP_REGION }}-docker.pkg.dev/${{ vars.GCP_PROJECT }}/${{ vars.AR_REPO }}
 
 jobs:
-  build-and-submit:
+  build-and-publish:
     runs-on: ubuntu-latest
     # Workload Identity Federation 에 id-token 권한이 필요하다.
     permissions:
@@ -91,12 +95,9 @@ jobs:
           IMAGE_TAG: ${{ steps.tag.outputs.value }}
         run: uv run python ${PIPELINE_DIR}/pipeline.py
 
-      - name: Submit pipeline to Vertex AI
-        run: |
-          uv run python submit.py \
-            --project "${{ vars.GCP_PROJECT }}" \
-            --region "${{ vars.GCP_REGION }}" \
-            --pipeline-root "${{ vars.PIPELINE_ROOT }}" \
-            --template "${PIPELINE_DIR}/ci-cd-pipeline.yaml" \
-            --display-name "ci-cd-cifar10-${{ steps.tag.outputs.value }}" \
-            --enable-caching
+      - name: Upload pipeline template to KFP registry
+        env:
+          KFP_HOST: ${{ vars.KFP_HOST }}
+          TEMPLATE_PATH: ${{ env.PIPELINE_DIR }}/ci-cd-pipeline.yaml
+          TAGS: ${{ steps.tag.outputs.value }},latest
+        run: uv run python ${PIPELINE_DIR}/upload_template.py
