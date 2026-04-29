@@ -82,7 +82,7 @@ uv run python submit.py \
 
 워크플로우 파일은 `.github/workflows/03-ci-cd.yml` 에 있습니다. `main` 브랜치에 푸시가 발생하고, 그 커밋이 `03-ci-cd/**`, `submit.py`, `pyproject.toml`, `uv.lock`, 또는 워크플로우 파일 자체를 건드린 경우에만 실행됩니다(경로 필터). Actions 탭에서 `workflow_dispatch` 로 수동 실행도 가능합니다.
 
-실행되면 먼저 `actions/checkout@v4` 로 리포를 받아온 뒤, `${GITHUB_SHA::7}` 을 `IMAGE_TAG` 로 잡아 둡니다. 그 다음 `google-github-actions/auth@v2` 가 Workload Identity Federation 을 통해 단기 토큰을 발급받고, `setup-gcloud@v2` 로 gcloud CLI 를 준비합니다. `gcloud auth configure-docker gcr.io` 로 Docker 가 GCR 로 푸시할 수 있게 하고, `docker buildx` 로 `03-ci-cd/*/Dockerfile` 을 glob 해서 각 폴더를 **짧은 SHA 태그 + `latest` 태그** 로 동시에 빌드/푸시합니다.
+실행되면 먼저 `actions/checkout@v4` 로 repository 를 받아온 뒤, `${GITHUB_SHA::7}` 을 `IMAGE_TAG` 로 잡아 둡니다. 그 다음 `google-github-actions/auth@v2` 가 Workload Identity Federation 을 통해 단기 토큰을 발급받고, `setup-gcloud@v2` 로 gcloud CLI 를 준비합니다. `gcloud auth configure-docker gcr.io` 로 Docker 가 GCR 로 푸시할 수 있게 하고, `docker buildx` 로 `03-ci-cd/*/Dockerfile` 을 glob 해서 각 폴더를 **짧은 SHA 태그 + `latest` 태그** 로 동시에 빌드/푸시합니다.
 
 이미지 푸시가 끝나면 `astral-sh/setup-uv@v4` 로 uv 를 설치하고 `uv sync --frozen` 으로 의존성을 락 기준으로 설치합니다. 이어서 `IMAGE_TAG` 환경변수를 같은 값으로 지정한 상태에서 `python 03-ci-cd/pipeline.py` 를 돌려 YAML 을 컴파일하고, 마지막으로 루트 `submit.py` 에 저장소 Variables 로 설정된 GCP 프로젝트/리전/pipeline root/서비스 계정/WIF provider 값을 넘겨 파이프라인을 제출합니다. 캐싱을 활성화해 두었기 때문에, 동일한 입력에 대한 재실행이 있으면 변경되지 않은 컴포넌트는 자동으로 건너뜁니다.
 
