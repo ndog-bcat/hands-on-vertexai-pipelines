@@ -149,48 +149,7 @@ gh auth status 2>&1 | grep -E 'Logged in to github.com'
 
 ---
 
-## Phase 3 — Repo 클론
-
-**Goal**: fork 한 repo 를 Cloud Shell 의 `$HOME` 에 클론하고 의존성 설치.
-
-### 3-1. Fork 준비 확인 (Human required)
-
-**Human required**: GitHub 웹에서 원본 repo 를 본인 계정으로 fork 해야 함.
-
-**Agent action**: 사용자에게 본인 GitHub username 과 fork 한 repo 이름을 물어본다. 두 값이 정해지면 환경변수로 보관:
-
-```bash
-read -p "Your GitHub username: " GH_OWNER
-read -p "Forked repo name (e.g., hands-on-vertexai-pipelines): " GH_REPO
-export GH_OWNER GH_REPO
-echo "GH_OWNER=$GH_OWNER GH_REPO=$GH_REPO"
-```
-
-### 3-2. 클론
-
-**Command**:
-```bash
-cd $HOME
-if [[ -d "$GH_REPO" ]]; then
-  echo "$GH_REPO already exists, pulling latest"
-  cd "$GH_REPO" && git pull --ff-only
-else
-  gh repo clone "$GH_OWNER/$GH_REPO"
-  cd "$GH_REPO"
-fi
-pwd
-```
-
-**Expected**: `/home/<user>/<GH_REPO>` 디렉터리에 위치.
-
-**Verify**:
-```bash
-test -f pyproject.toml && test -f HANDS_ON.md && echo OK || echo MISSING_FILES
-```
-
-**If fails**: 잘못된 owner/repo 이름. 3-1 로 돌아가 입력 재확인.
-
-### 3-3. 파이썬 의존성 설치
+## Phase 3 — 파이썬 의존성 설치
 
 **Command**:
 ```bash
@@ -350,28 +309,35 @@ gcloud storage buckets describe gs://$BUCKET --format='value(name,location)' --p
 
 → `<BUCKET> US-CENTRAL1` (또는 본인이 선택한 리전).
 
-### 6-2. 기본 Compute SA 에 버킷 권한 부여 (필수)
+### 6-2. 기본 Compute SA 에 권한 부여 (필수)
 
-**Goal**: 파이프라인 실행 SA(콘솔에서 별도 지정 안 하면 기본 Compute SA) 가 GCS 에 접근할 수 있게 함. 이 단계 빼먹으면 첫 제출에서 100% 실패함.
+**Goal**: 파이프라인 실행 SA(콘솔에서 별도 지정 안 하면 기본 Compute SA) 가 GCS 및 Vertex AI 메타데이터 저장소에 접근할 수 있게 함. 이 단계 빼먹으면 첫 제출에서 100% 실패함.
 
 **Command**:
 ```bash
+# 1. GCS 버킷 관리 권한
 gcloud storage buckets add-iam-policy-binding gs://$BUCKET \
     --member="serviceAccount:${PROJECT_NUMBER}-compute@developer.gserviceaccount.com" \
     --role="roles/storage.objectAdmin" \
+    --project $PROJECT_ID
+
+# 2. Vertex AI 사용자 권한 (메타데이터 저장소 접근용)
+gcloud projects add-iam-policy-binding $PROJECT_ID \
+    --member="serviceAccount:${PROJECT_NUMBER}-compute@developer.gserviceaccount.com" \
+    --role="roles/aiplatform.user" \
     --project $PROJECT_ID
 ```
 
 **Verify**:
 ```bash
-gcloud storage buckets get-iam-policy gs://$BUCKET --project $PROJECT_ID \
+gcloud projects get-iam-policy $PROJECT_ID \
   --flatten='bindings[].members' \
-  --filter='bindings.members:*-compute@developer.gserviceaccount.com' \
+  --filter="bindings.members:${PROJECT_NUMBER}-compute@developer.gserviceaccount.com" \
   --format='value(bindings.role)' \
-  | grep -q 'roles/storage.objectAdmin' && echo OK || echo MISSING
+  | grep -E 'roles/storage.objectAdmin|roles/aiplatform.user'
 ```
 
-→ `OK` 출력.
+→ 두 역할이 모두 출력되어야 함.
 
 ---
 
@@ -384,6 +350,10 @@ gcloud storage buckets get-iam-policy gs://$BUCKET --project $PROJECT_ID \
 **Command**:
 ```bash
 cd $HOME/$GH_REPO
+# 실행 전 환경변수가 현재 세션에 로드되어 있는지 확인
+export GCP_PROJECT=$PROJECT_ID
+export GCP_REGION=$REGION
+
 uv run python 01-first-pipeline/01-direct-run.py 2>&1 | tee /tmp/01-run.log
 ```
 
@@ -718,11 +688,14 @@ https://console.cloud.google.com/vertex-ai/pipelines/templates?project=<PROJECT_
 
 | 증상 | 가장 자주 막힌 단계 |
 |---|---|
-| `storage.objects.get/create` 에러 | Phase 6-2 (기본 Compute SA 권한) 누락 |
+| `storage.objects.get/create` 에러 | Phase 6-2 (기본 Compute SA 권한) 중 Storage Admin 누락 |
+| `Permission 'aiplatform.metadataStores.get' denied` | Phase 6-2 에서 `roles/aiplatform.user` 권한 부여 누락 |
+| `KeyError: 'GCP_PROJECT'` | `GCP_PROJECT` 환경변수 미설정. Phase 7-1의 export 명령 확인 |
 | `IAM Service Account Credentials API ... is disabled` | Phase 5 에서 `iamcredentials.googleapis.com` 빠뜨림 |
 | `Permission 'iam.serviceAccounts.getAccessToken' denied` | Phase 9-7 의 `${GH_OWNER}/${GH_REPO}` 가 fork 와 불일치 |
 | 워크플로우의 `Authenticate ... WIF` 실패 | Phase 10 에서 Variables 가 Variables 탭이 아닌 Secrets 탭에 등록됨 |
 | `RESOURCE_EXHAUSTED ... custom_model_training_nvidia_t4_gpus` | T4 학습 쿼터 0 (GCE 쿼터와 별개). `train_accelerator_count=0` 로 재실행하거나 콘솔에서 쿼터 신청 |
+| `workerpool0-0 exited with status 1` / `No such file or directory` | GCS Fuse 동기화 지연 또는 권한 문제. Phase 6-2 권한 재확인 후 1-2분 뒤 재시도(Retry) |
 | `Invalid image URI` | 이미지 호스트가 `mirror.gcr.io` 등 비허용 호스트. 본인 빌드 이미지 또는 Docker Hub 로 |
 
 ---
